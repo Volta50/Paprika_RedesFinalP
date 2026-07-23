@@ -1,12 +1,10 @@
-# Configuración de BGP (eBGP) y NAT/PAT — Bordes de Internet
+# Configuración de eBGP y NAT/PAT en los bordes de Internet
 
-**Routers involucrados:** R1-BOG, R1-SMA, R1-CUC, R1-BAQ (c7200) · interfaz `f3/1` en cada uno, hacia su respectivo `ISP-<ciudad>` (AS 65000).
+Routers de borde: R1-BOG, R1-SMA, R1-CUC y R1-BAQ (c7200). Cada uno sale por su interfaz `f3/1` hacia el `ISP-<ciudad>` correspondiente, todos ellos en el AS 65000.
 
-Cada sede tiene **su propio AS** y **su propio ISP simulado** — no hay un único punto de salida, cada router sale directo a Internet por su `f3/1`.
+El diseño no usa un único punto de salida. Cada sede tiene su propio AS y su propio ISP simulado, y sale directo a Internet por su enlace local.
 
----
-
-## 1. Datos de referencia (del Excel)
+## 1. Direccionamiento de los enlaces de borde
 
 | Sede | Router | AS local | IP R1 (f3/1) | IP ISP (f0/0) | AS ISP |
 |---|---|---|---|---|---|
@@ -15,38 +13,29 @@ Cada sede tiene **su propio AS** y **su propio ISP simulado** — no hay un úni
 | CUC | R1-CUC | 65003 | 203.0.113.5/30 | 203.0.113.6 | 65000 |
 | BAQ | R1-BAQ | 65004 | 203.0.113.13/30 | 203.0.113.14 | 65000 |
 
-Red interna anunciada por EIGRP 100: `10.0.0.0/8` (ver resumen del proyecto). Cada sede solo necesita anunciar **su propio bloque** hacia el ISP si quieres que la vuelta sea óptima, o puedes resumir `10.0.0.0/8` completo desde las 4 — más abajo se explican ambas opciones.
+La red interna que maneja EIGRP 100 es `10.0.0.0/8`.
 
----
+## 2. NAT/PAT
 
-## 2. NAT/PAT — misma lógica en los 4 routers
+La lógica es la misma en los cuatro routers: `f3/1` queda como `nat outside` y todas las interfaces internas del router (`f0/0`, `f3/0`, seriales y Metro-Ethernet hacia otras sedes) quedan como `nat inside`.
 
-Concepto: `f3/1` es `nat outside` (hacia el ISP), **todas** las interfaces internas del router (`f0/0`, `f3/0`, seriales/Metro-E hacia otras sedes) son `nat inside`. Esto ya viene parcialmente aplicado por el patch (`ip nat inside` en cada interfaz interna, `ip nat outside` en `f3/1`) — aquí falta la **access-list** y el comando `overload`.
+### 2.1 Access-list del tráfico a traducir
 
-### 2.1 Access-list de tráfico a traducir
-
-Usamos la red interna completa `10.0.0.0/8` para que cualquier host de cualquier sede pueda salir por el borde local:
+Se tradujo la red interna completa, de modo que cualquier host de cualquier sede pueda salir por el borde local:
 
 ```
 access-list 1 permit 10.0.0.0 0.255.255.255
 ```
 
-(Igual en los 4 routers — así el tráfico que llega por EIGRP desde otra sede y sale por este borde también se traduce.)
+La misma ACL se aplicó en los cuatro routers, así el tráfico que llega por EIGRP desde otra sede y sale por este borde también se traduce.
 
-### 2.2 PAT overload
+### 2.2 PAT con overload
 
 ```
 ip nat inside source list 1 interface FastEthernet3/1 overload
 ```
 
-### 2.3 Verificar que las interfaces ya tengan `nat inside`/`nat outside`
-
-```
-show ip interface f3/1 | include NAT
-show run | include ip nat
-```
-
-Si falta alguna (el patch debería haberlas dejado), agrégalas:
+### 2.3 Marcado de interfaces
 
 ```
 interface FastEthernet3/1
@@ -56,32 +45,30 @@ interface FastEthernet0/0
  ip nat inside
 interface FastEthernet3/0
  ip nat inside
-! + cada interfaz WAN interna (seriales, Metro-E) hacia otras sedes
 ```
 
----
-
-## 3. BGP — configuración por router
-
-> **Sobre los `network`:** BGP solo anuncia lo que exista **exacto** en la tabla de rutas (no VLSM automático). Como tus VLANs no caen limpio en un solo resumen simple por sede (mezcla /17, /18, /19), lo más simple y robusto para este laboratorio es anunciar **`10.0.0.0/8` desde las 4 sedes** — el ISP ve 4 caminos hacia la misma red interna y elige por AS-path/metric, y evitas tener que declarar `ip route 10.x.x.x mask ... Null0` por cada resumen que no exista literal en la tabla:
+Lo mismo en cada interfaz WAN interna (seriales y Metro-Ethernet) hacia las otras sedes. Para revisar qué quedó aplicado:
 
 ```
-router bgp <AS-local>
- network 10.0.0.0 mask 255.0.0.0
- network 10.0.0.0 mask 255.0.0.0
+show ip interface f3/1 | include NAT
+show run | include ip nat
 ```
 
-Con ruta estática de resumen apuntando a Null0 (necesaria para que BGP tenga la ruta exacta que anunciar):
+## 3. Anuncio BGP de la red interna
+
+BGP solo anuncia prefijos que existan exactos en la tabla de rutas. Como las VLANs del proyecto mezclan /17, /18 y /19 y no caen en un resumen limpio por sede, se optó por anunciar `10.0.0.0/8` desde las cuatro sedes. El ISP ve cuatro caminos hacia la misma red interna y elige por AS-path y métrica, y se evita declarar una estática Null0 por cada resumen intermedio.
+
+Para que BGP tenga la ruta exacta que anunciar se agregó una estática de resumen hacia Null0 con distancia administrativa 254:
 
 ```
 ip route 10.0.0.0 255.0.0.0 Null0 254
 ```
 
-Esa ruta con AD 254 nunca compite con las rutas EIGRP internas reales (AD 90) — solo existe para satisfacer el requisito de BGP de tener una ruta exacta que anunciar. Aplica este bloque (`network` + `ip route ... Null0 254`) igual en los 4 routers.
+Con AD 254 nunca compite con las rutas EIGRP reales (AD 90), que siguen siendo las que transportan el tráfico interno.
 
-### 3.5 Configuración recomendada por router (versión final, con NAT y BGP juntos)
+## 4. Configuración aplicada en cada router de borde
 
-**R1-BOG:**
+**R1-BOG**
 ```
 configure terminal
 access-list 1 permit 10.0.0.0 0.255.255.255
@@ -95,7 +82,7 @@ end
 write memory
 ```
 
-**R1-SMA:**
+**R1-SMA**
 ```
 configure terminal
 access-list 1 permit 10.0.0.0 0.255.255.255
@@ -109,7 +96,7 @@ end
 write memory
 ```
 
-**R1-CUC:**
+**R1-CUC**
 ```
 configure terminal
 access-list 1 permit 10.0.0.0 0.255.255.255
@@ -123,7 +110,7 @@ end
 write memory
 ```
 
-**R1-BAQ:**
+**R1-BAQ**
 ```
 configure terminal
 access-list 1 permit 10.0.0.0 0.255.255.255
@@ -137,13 +124,11 @@ end
 write memory
 ```
 
----
+## 5. Routers ISP
 
-## 4. Los routers ISP (extremo remoto)
+Los ISP se agregaron como nodos nuevos, así que hubo que configurarles la interfaz con IP y `no shutdown` además del BGP. Sin ninguna IP configurada, BGP no puede elegir router-id (aparece `%BGP-4-NORTRID`) y el vecino queda en `Idle`; además el ping desde la red interna muere en el borde porque nadie responde ARP por la IP del ISP.
 
-Los ISP son nodos nuevos: hay que configurarles **la interfaz con IP y `no shutdown`** además del BGP. Sin IP en ninguna interfaz, BGP no puede elegir router-id (`%BGP-4-NORTRID`) y el vecino queda en `Idle` para siempre; además el ping desde la red interna muere en el borde porque nadie responde ARP por la IP del ISP.
-
-**ISP-BOG:**
+**ISP-BOG**
 ```
 configure terminal
 hostname ISP-BOG
@@ -158,7 +143,7 @@ end
 write memory
 ```
 
-**ISP-SMA:**
+**ISP-SMA**
 ```
 configure terminal
 hostname ISP-SMA
@@ -173,7 +158,7 @@ end
 write memory
 ```
 
-**ISP-CUC:**
+**ISP-CUC**
 ```
 configure terminal
 hostname ISP-CUC
@@ -188,7 +173,7 @@ end
 write memory
 ```
 
-**ISP-BAQ:**
+**ISP-BAQ**
 ```
 configure terminal
 hostname ISP-BAQ
@@ -203,7 +188,9 @@ end
 write memory
 ```
 
-**Loopbacks 8.8.8.8 / 1.1.1.1 (para que los forwarders del DNS respondan):** los 4 ISP comparten AS 65000 pero **no están conectados entre sí** — son islas. Para que `8.8.8.8` responda desde las 4 sedes, configura las mismas loopbacks en los **4** ISP (repetir la IP entre islas no genera conflicto):
+### 5.1 Loopbacks 8.8.8.8 y 1.1.1.1
+
+Los cuatro ISP comparten el AS 65000 pero no están conectados entre sí, funcionan como islas independientes. Para que `8.8.8.8` responda desde las cuatro sedes se configuraron las mismas loopbacks en los cuatro ISP; repetir la IP entre islas no genera conflicto.
 
 ```
 configure terminal
@@ -219,49 +206,46 @@ end
 write memory
 ```
 
----
-
-## 5. Verificación
+## 6. Verificación
 
 En cada R1:
 
 ```
-show ip bgp summary                  ! State/PfxRcd — debe decir el número de prefijos, no "Idle" ni "Active"
-show ip route bgp                    ! ver rutas aprendidas del ISP (o default si aplica)
-show ip nat translations             ! después de generar tráfico
+show ip bgp summary
+show ip route bgp
+show ip nat translations
 show ip nat statistics
 ```
 
-Prueba desde un VPCS interno:
+En `show ip bgp summary` la columna State/PfxRcd debe mostrar el número de prefijos recibidos, no `Idle` ni `Active`.
+
+Desde un VPCS interno:
 
 ```
-VPCS> ping 203.0.113.2      ! (o .10/.6/.14 según la sede) — llega hasta el ISP local
+VPCS> ping 203.0.113.2
 ```
 
-En el router, mientras el VPCS hace ping:
+(o .10 / .6 / .14 según la sede). Mientras el VPCS hace ping, en el router:
 
 ```
 R1-BOG# show ip nat translations
 ```
 
-Debes ver una entrada tipo:
+La salida obtenida:
+
 ```
 Pro  Inside global      Inside local       Outside local      Outside global
 icmp 203.0.113.1:5      10.2.255.253:5     203.0.113.2:5      203.0.113.2:5
 ```
 
-Eso confirma NAT/PAT funcionando: la IP interna `10.2.255.253` sale traducida a `203.0.113.1` (la IP pública de R1-BOG).
+La IP interna `10.2.255.253` sale traducida a `203.0.113.1`, la IP pública de R1-BOG.
 
-Con las loopbacks de la sección 4 configuradas, `ping 8.8.8.8` desde el Srv-DNS o un VPCS debe funcionar (vía NAT). Nota: no hay un DNS real detrás de la loopback, así que `dig google.com` seguirá sin resolver — la loopback solo prueba que el camino y el NAT funcionan; la resolución interna de `redes2026.local` es el entregable real.
+Con las loopbacks de la sección 5.1 configuradas, `ping 8.8.8.8` funciona desde el servidor DNS o desde un VPCS. No hay un resolutor real detrás de esa loopback, así que `dig google.com` no resuelve; la loopback solo comprueba que el camino y la traducción funcionan. La resolución interna de `redes2026.local` es la que se documenta como entregable.
 
----
+## 7. Puntos revisados al cerrar
 
-## 6. Checklist BGP/NAT
-
-- [ ] `show ip bgp summary` en los 4 R1: vecino en estado `Established` (o número, no `Idle`/`Active`/`Connect`).
-- [ ] `show ip bgp summary` en los 4 ISP: mismo resultado desde el otro lado.
-- [ ] `ip route ... Null0 254` presente y **no** compitiendo con EIGRP (AD 254 vs AD 90 — EIGRP siempre gana para el tráfico interno real).
-- [ ] `access-list 1` cubre `10.0.0.0/8` en los 4 routers.
-- [ ] `ip nat inside`/`ip nat outside` correctos en todas las interfaces (usa `show ip nat statistics` → sección "Interfaces").
-- [ ] `show ip nat translations` muestra entradas activas al hacer ping/DNS desde un cliente interno hacia una IP pública.
-- [ ] (Opcional) Loopback 8.8.8.8/1.1.1.1 en un ISP si quieres que los forwarders del DNS "respondan" dentro del laboratorio.
+- `show ip bgp summary` en los cuatro R1 y en los cuatro ISP, con la sesión en `Established`.
+- La estática `ip route ... Null0 254` presente y sin competir con EIGRP.
+- `access-list 1` cubriendo `10.0.0.0/8` en los cuatro routers.
+- `ip nat inside` e `ip nat outside` correctos en todas las interfaces, revisado con la sección "Interfaces" de `show ip nat statistics`.
+- Entradas activas en `show ip nat translations` al generar tráfico desde un cliente interno.

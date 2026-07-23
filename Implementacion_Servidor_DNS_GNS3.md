@@ -1,62 +1,50 @@
-# Implementación de Servidor DNS Centralizado (BIND9) en GNS3
+# Servidor DNS centralizado con BIND9 en GNS3
 
-**Topología:** la misma del proyecto — 4 sedes (Bogotá, Santa Marta, Cúcuta, Barranquilla) · EIGRP 100 · HSRP · NAT/BGP hacia ISP.
+Misma topología del proyecto: 4 sedes, EIGRP 100, HSRP y salida a Internet con NAT y BGP.
 
-**Servidor DNS:** contenedor Docker (`gns3/srv-dns`), IP estática `10.4.192.11`, alojado en VLAN 40 (SERVIDORES) de Bogotá, conectado a **SW1-BOG f1/5** (puerto de acceso VLAN 40 libre según el Excel).
+El servidor DNS es un contenedor Docker (`gns3/srv-dns`) con IP estática `10.4.192.11`, ubicado en la VLAN 40 (SERVIDORES) de Bogotá y conectado a **SW1-BOG f1/5**, puerto de acceso de esa VLAN.
 
-**Dominio interno:** `redes2026.local`
-
----
+Dominio interno: `redes2026.local`
 
 ## 1. Objetivo
 
-Montar un servidor DNS autoritativo para el dominio interno `redes2026.local` usando `bind9` en un contenedor Debian dentro de GNS3, con:
+Montar un DNS autoritativo para `redes2026.local` con `bind9` sobre Debian dentro de GNS3, con:
 
-- **Zona directa** (`redes2026.local`) con registros A para los servicios de la red (dhcp, dns, web, ftp, ldap, impresión).
-- **Zona inversa** (`10.in-addr.arpa`) para resolución PTR de las IPs internas.
-- **Forwarders** hacia 8.8.8.8 / 1.1.1.1 para resolver nombres externos (saliendo por NAT/BGP).
-- Integración con el DHCP existente: los clientes reciben `10.4.192.11` como DNS vía `option domain-name-servers`.
+- Zona directa con registros A para los servicios de la red (dhcp, dns, web, ftp, ldap, impresión).
+- Zona inversa `10.in-addr.arpa` para resolución PTR de las IPs internas.
+- Forwarders hacia 8.8.8.8 y 1.1.1.1 para nombres externos, saliendo por NAT y BGP.
+- Integración con el DHCP: los clientes reciben `10.4.192.11` como servidor DNS vía `option domain-name-servers`.
 
-A diferencia del DHCP, el DNS **no necesita relay ni `ip helper-address`**: los clientes le hablan directamente por unicast al puerto 53 (UDP/TCP), y EIGRP ya sabe llegar a `10.4.192.0/18` desde todas las sedes. Lo único que hay que garantizar es enrutamiento (ya probado con el DHCP).
-
----
+A diferencia del DHCP, el DNS no necesita relay ni `ip helper-address`. Los clientes le hablan directamente por unicast al puerto 53 y EIGRP ya sabe llegar a `10.4.192.0/18` desde todas las sedes, lo cual quedó comprobado con el DHCP.
 
 ## 2. Arquitectura
 
 ```
-Cliente (VPCS/PC, IP por DHCP con DNS=10.4.192.11)
-   → consulta DNS unicast al puerto 53
-   → gateway HSRP (VIP) de su VLAN
-   → EIGRP 100 → WAN → R1-BOG
-   → SW1-BOG f1/5 → contenedor Srv-DNS (10.4.192.11)
+Cliente (VPCS/PC, con DNS=10.4.192.11 por DHCP)
+   -> consulta unicast al puerto 53
+   -> gateway HSRP de su VLAN
+   -> EIGRP 100 -> WAN -> R1-BOG
+   -> SW1-BOG f1/5 -> contenedor Srv-DNS (10.4.192.11)
 ```
 
-Puntos clave:
+El DNS comparte la VLAN 40 de Bogotá con el DHCP (`10.4.192.10`) y toma la `.11`. El gateway del contenedor es `10.4.192.2`, la SVI real de SW1-BOG, con el mismo criterio que el DHCP. Para los nombres externos, BIND reenvía a 8.8.8.8 por la ruta por defecto y sale traducido en R1-BOG.
 
-- Misma VLAN 40 de Bogotá donde vive el DHCP (`10.4.192.10`). El DNS toma la `.11`.
-- Default gateway del contenedor: `10.4.192.2` (SVI real de SW1-BOG), igual criterio que el DHCP — predecible en pruebas; cambiar a la VIP `10.4.192.1` si se quiere resiliencia ante falla de SW1.
-- Para nombres externos (`google.com`), bind reenvía a `8.8.8.8` saliendo por la ruta default → NAT/PAT en R1-BOG → ISP.
-
----
-
-## 3. Plan de nombres (zona directa)
+## 3. Plan de nombres
 
 | FQDN | IP | Rol |
 |---|---|---|
 | dns.redes2026.local | 10.4.192.11 | Este servidor (BOG VLAN 40) |
 | dhcp.redes2026.local | 10.4.192.10 | Srv-DHCP (BOG VLAN 40) |
 | ldap.bog.redes2026.local | 10.4.192.12 | LDAP Bogotá |
-| web.sma.redes2026.local | 10.1.128.10 | WEB Santa Marta (VLAN 40 SMA) |
+| web.sma.redes2026.local | 10.1.128.10 | WEB Santa Marta |
 | ldap.sma.redes2026.local | 10.1.128.11 | LDAP Santa Marta |
 | print.sma.redes2026.local | 10.1.128.12 | Impresión Santa Marta |
-| web.cuc.redes2026.local | 10.4.64.10 | WEB/FTP Cúcuta (VLAN 40 CUC) |
+| web.cuc.redes2026.local | 10.4.64.10 | WEB/FTP Cúcuta |
 | ldap.cuc.redes2026.local | 10.4.64.11 | LDAP Cúcuta |
-| ldap.baq.redes2026.local | 10.5.0.10 | LDAP Barranquilla (VLAN 40 BAQ) |
+| ldap.baq.redes2026.local | 10.5.0.10 | LDAP Barranquilla |
 | ssh.baq.redes2026.local | 10.5.0.11 | SSH Barranquilla |
 
-> Ajusta las IPs de los demás servidores a medida que los montes; todos deben caer dentro de la VLAN 40 de su sede. También se definen alias (CNAME) `www` y `ftp` apuntando a los servidores web/ftp.
-
----
+Todos los servidores caen dentro de la VLAN 40 de su sede. Se definieron además los alias `www` y `ftp` como CNAME hacia los servidores web y ftp.
 
 ## 4. Archivos de configuración
 
@@ -73,7 +61,7 @@ cat > named.conf.options << 'EOF'
 options {
     directory "/var/cache/bind";
 
-    // Solo la red interna 10.0.0.0/8 puede consultar y usar recursión
+    // Solo la red interna puede consultar y usar recursión
     allow-query { 10.0.0.0/8; 127.0.0.1; };
     recursion yes;
     allow-recursion { 10.0.0.0/8; 127.0.0.1; };
@@ -82,7 +70,7 @@ options {
     forwarders { 8.8.8.8; 1.1.1.1; };
     forward only;
 
-    // GNS3/laboratorio: sin DNSSEC para evitar fallos de validación
+    // Sin DNSSEC en el laboratorio, para evitar fallos de validación
     dnssec-validation no;
 
     listen-on { 10.4.192.11; 127.0.0.1; };
@@ -100,7 +88,7 @@ zone "redes2026.local" {
     file "/etc/bind/db.redes2026.local";
 };
 
-// Zona inversa para todo 10.0.0.0/8 (cubre todas las sedes)
+// Zona inversa para todo 10.0.0.0/8, cubre las cuatro sedes
 zone "10.in-addr.arpa" {
     type master;
     file "/etc/bind/db.10";
@@ -114,14 +102,14 @@ EOF
 cat > db.redes2026.local << 'EOF'
 $TTL 604800
 @   IN  SOA dns.redes2026.local. admin.redes2026.local. (
-        2026071602 ; Serial (fecha + nn — incrementar en cada cambio)
+        2026071602 ; Serial (fecha + nn, se incrementa en cada cambio)
         604800     ; Refresh
         86400      ; Retry
         2419200    ; Expire
         604800 )   ; Negative Cache TTL
 
 @       IN  NS   dns.redes2026.local.
-@       IN  A    10.4.192.11   ; apex: permite resolver el dominio "pelado" (ping redes2026.local)
+@       IN  A    10.4.192.11   ; apex, permite resolver el dominio sin subdominio
 
 ; ---- Bogotá (VLAN 40: 10.4.192.0/18) ----
 dns         IN  A   10.4.192.11
@@ -141,7 +129,7 @@ ldap.cuc    IN  A   10.4.64.11
 ldap.baq    IN  A   10.5.0.10
 ssh.baq     IN  A   10.5.0.11
 
-; ---- Alias de conveniencia ----
+; ---- Alias ----
 www         IN  CNAME  web.sma.redes2026.local.
 ftp         IN  CNAME  web.cuc.redes2026.local.
 EOF
@@ -149,7 +137,7 @@ EOF
 
 ### 4.4 Zona inversa `db.10`
 
-Los PTR en `10.in-addr.arpa` van con los **octetos invertidos** (10.4.192.11 → `11.192.4`).
+Los PTR en `10.in-addr.arpa` llevan los octetos invertidos (10.4.192.11 queda como `11.192.4`).
 
 ```bash
 cat > db.10 << 'EOF'
@@ -173,11 +161,9 @@ $TTL 604800
 EOF
 ```
 
----
-
 ## 5. `Dockerfile.dns`
 
-Mismo patrón que el DHCP: IP estática en runtime, demonio en background, shell interactiva al final (sin `-f`/`-g` para no bloquear la consola de GNS3, y `;` en vez de `&&` para llegar siempre al bash).
+Se siguió el mismo patrón del DHCP: IP estática en tiempo de ejecución, demonio en background y shell interactiva al final, sin `-f` ni `-g` para no bloquear la consola de GNS3, y con `;` en lugar de `&&` entre instrucciones.
 
 ```bash
 cd ~/gns3-servers/dns
@@ -195,16 +181,9 @@ CMD ifconfig eth0 10.4.192.11 netmask 255.255.192.0 up; \
 EOF
 ```
 
-| Instrucción | Función |
-|---|---|
-| `ifconfig eth0 10.4.192.11 ...` | IP estática del servidor DNS en la VLAN 40 (/18) al arrancar. |
-| `route add default gw 10.4.192.2` | Default hacia SW1-BOG (misma decisión que el DHCP; cambiar a `10.4.192.1` para depender de la VIP HSRP). |
-| `/usr/sbin/named -u bind` | Arranca BIND9 **en background** (sin `-g`/`-f`), corriendo como usuario `bind`. |
-| `exec /bin/bash` | Deja una CLI usable en la consola de GNS3. |
+`named` corre como usuario `bind` y en segundo plano, y `exec /bin/bash` deja la consola de GNS3 con un prompt utilizable.
 
-### Validar sintaxis antes del build (opcional pero recomendado)
-
-Si tienes bind9utils en el host:
+Validación de sintaxis antes del build, si el host tiene bind9utils instalado:
 
 ```bash
 named-checkconf named.conf.local
@@ -212,11 +191,9 @@ named-checkzone redes2026.local db.redes2026.local
 named-checkzone 10.in-addr.arpa db.10
 ```
 
-(Dentro del contenedor también se pueden ejecutar tras el arranque.)
+Los mismos comandos se pueden correr dentro del contenedor ya arrancado.
 
----
-
-## 6. Build y despliegue en GNS3
+## 6. Build y despliegue
 
 ```bash
 cd ~/gns3-servers/dns
@@ -225,37 +202,32 @@ docker build -t gns3/srv-dns -f Dockerfile.dns .
 
 En GNS3:
 
-1. Crear plantilla Docker nueva con la imagen `gns3/srv-dns` (1 NIC). Verificar que **Start command** esté vacío para no sobrescribir el `CMD`.
-2. Conectar la NIC a **SW1-BOG f1/5** (puerto de acceso VLAN 40 libre; f1/4 de SW1 también es VLAN 40 si f1/5 está ocupado).
-3. Iniciar el nodo.
+1. Se crea una plantilla Docker con la imagen `gns3/srv-dns` y 1 NIC, dejando el campo **Start command** vacío para no sobrescribir el `CMD`.
+2. Se conecta la NIC a **SW1-BOG f1/5**. El puerto f1/4 de SW1 también está en la VLAN 40 si f1/5 está ocupado.
+3. Se inicia el nodo.
 
----
+## 7. Verificación del arranque
 
-## 7. Verificación de arranque
-
-En la consola del contenedor (debe aparecer un prompt de shell):
+En la consola del contenedor:
 
 ```bash
 ifconfig eth0                 # IP 10.4.192.11/18
 route -n                      # default vía 10.4.192.2
-pidof named                   # named corriendo en background (debian:12-slim no trae ps)
-named-checkconf               # sin salida = config OK
+pidof named                   # debian:12-slim no trae ps
+named-checkconf               # sin salida significa configuración correcta
 ping -c 4 10.4.192.2          # conectividad a SW1-BOG
-ping -c 4 10.4.192.10         # ve al Srv-DHCP en la misma VLAN
+ping -c 4 10.4.192.10         # alcance al Srv-DHCP en la misma VLAN
 
-# Pruebas locales de resolución:
-dig @127.0.0.1 dns.redes2026.local +short        # → 10.4.192.11
-dig @127.0.0.1 -x 10.4.192.10 +short             # → dhcp.redes2026.local.
-dig @127.0.0.1 google.com +short                 # requiere NAT/BGP funcionando
+dig @127.0.0.1 dns.redes2026.local +short        # 10.4.192.11
+dig @127.0.0.1 -x 10.4.192.10 +short             # dhcp.redes2026.local.
+dig @127.0.0.1 google.com +short                 # depende de NAT/BGP
 ```
 
-Si `named` no arranca, revisar `named-checkconf` y `named-checkzone` (errores de sintaxis en zonas son la causa típica), o arrancarlo temporalmente con `-g` para ver el log en primer plano.
+Cuando `named` no arranca, la causa suele estar en la sintaxis de las zonas. Se revisa con `named-checkconf` y `named-checkzone`, o arrancando el demonio temporalmente con `-g` para ver el log en primer plano.
 
----
+## 8. Integración con el DHCP
 
-## 8. Integrar con el DHCP existente
-
-Editar `~/gns3-servers/dhcpd.conf` y reemplazar en **todos** los bloques `subnet`:
+En `~/gns3-servers/dhcpd.conf` se reemplazó, en todos los bloques `subnet`:
 
 ```
 option domain-name-servers 8.8.8.8, 1.1.1.1;
@@ -268,65 +240,62 @@ option domain-name-servers 10.4.192.11;
 option domain-name "redes2026.local";
 ```
 
-Luego reconstruir y reiniciar el nodo DHCP:
+Luego se reconstruyó la imagen del DHCP y se reinició el nodo:
 
 ```bash
 cd ~/gns3-servers
 docker build -t gns3/srv-dhcp -f Dockerfile.dhcp .
-# En GNS3: stop/start del nodo Srv-DHCP (o recrearlo)
 ```
 
-Los clientes que renueven su lease (`ip dhcp` de nuevo en VPCS) recibirán el DNS interno.
+Los clientes reciben el DNS interno al renovar el lease.
 
----
+## 9. Prueba end-to-end
 
-## 9. Prueba funcional end-to-end
-
-Desde un VPCS en cualquier VLAN de usuario (VPCS no tiene resolver completo, pero soporta `ip dns` y ping por nombre):
+Desde un VPCS. No tiene resolutor completo, pero soporta `ip dns` y ping por nombre:
 
 ```
-VPCS> ip dhcp                      # renueva; ahora DNS=10.4.192.11
-VPCS> show ip                      # confirmar campo DNS
-VPCS> ping redes2026.local         # resuelve el ápex (A en @) → 10.4.192.11
-VPCS> ping dhcp.redes2026.local    # VPCS resuelve vía el DNS asignado
+VPCS> ip dhcp
+VPCS> show ip
+VPCS> ping redes2026.local
+VPCS> ping dhcp.redes2026.local
 VPCS> ping dns.redes2026.local
 ```
 
-Con un cliente Docker/VM Linux la prueba es más completa:
+Con un cliente Docker o una VM Linux la prueba es más completa:
 
 ```bash
 nslookup web.cuc.redes2026.local 10.4.192.11
 dig @10.4.192.11 -x 10.4.192.11 +short
-dig @10.4.192.11 www.redes2026.local        # sigue el CNAME
+dig @10.4.192.11 www.redes2026.local
 ```
 
-En el servidor se puede observar el tráfico en vivo:
+Para observar el tráfico en el servidor:
 
 ```bash
-rndc querylog on          # activa log de consultas
-tail -f /var/log/syslog   # o journalctl si aplica
+rndc querylog on
+tail -f /var/log/syslog
 ```
 
----
+## 10. Verificaciones realizadas
 
-## 10. Checklist DNS (post-implementación)
+- `named` corriendo en background y `named-checkconf` sin errores.
+- Resolución directa e inversa desde el propio servidor con `dig @127.0.0.1`.
+- Resolución desde clientes de las cuatro sedes, al menos una VLAN por ciudad, lo que valida el enrutamiento de retorno de EIGRP.
+- Clientes DHCP recibiendo `10.4.192.11` como DNS tras renovar el lease.
+- Resolución externa con `dig google.com`, dependiente de NAT y BGP. Cuando falla se revisa `show ip nat translations` y `show ip bgp summary` en R1-BOG.
+- Failover de HSRP, con la ruta por defecto del contenedor apuntando a la VIP y SW1-BOG apagado.
+- Incremento del Serial del SOA en cada edición de zona, seguido de `rndc reload` o reinicio del nodo.
 
-- [ ] `named` corre en background y `named-checkconf` limpio.
-- [ ] Resolución directa e inversa desde el propio servidor (`dig @127.0.0.1`).
-- [ ] Resolución desde clientes de las 4 sedes (prueba al menos una VLAN por ciudad — valida enrutamiento de retorno EIGRP, igual que con DHCP).
-- [ ] Clientes DHCP reciben `10.4.192.11` como DNS tras renovar lease.
-- [ ] Resolución externa (`dig google.com`) — depende de NAT/BGP; si falla, verificar `show ip nat translations` y `show ip bgp summary` en R1-BOG.
-- [ ] Failover HSRP: si la default del contenedor apunta a la VIP, apagar SW1-BOG y repetir consultas remotas.
-- [ ] Incrementar el **Serial** del SOA cada vez que se edite una zona (y `rndc reload` o reiniciar el nodo).
+### Problema encontrado con la VIP de HSRP en c3725 + NM-16ESW
 
-> **Quirk conocido GNS3 (c3725 + NM-16ESW) — VIP HSRP no responde:** si un cliente resuelve ARP de la VIP a la vMAC `0000.0c07.acXX` pero los pings a la VIP hacen timeout (mientras las SVIs reales `.2`/`.3` sí responden), es el bug de forwarding de MAC virtual del NM-16ESW. Solución: `standby <grupo> use-bia` en la SVI de **ambos** switches de la sede (todas las VLANs), y `clear arp` en los clientes. El Active pasa a responder ARP por la VIP con su MAC física; el failover sigue funcionando vía gratuitous ARP.
+En algunos casos el cliente resolvía el ARP de la VIP a la MAC virtual `0000.0c07.acXX` pero los pings a la VIP hacían timeout, mientras las SVIs reales `.2` y `.3` sí respondían. Es un problema de forwarding de MAC virtual del NM-16ESW en GNS3.
 
----
+La solución aplicada fue `standby <grupo> use-bia` en las SVIs de los dos switches de la sede, en todas las VLANs, y `clear arp` en los clientes. Con eso el switch activo responde ARP por la VIP con su MAC física y el failover sigue funcionando mediante gratuitous ARP.
 
 ## 11. Datos de referencia
 
-- **Servidor DNS:** `10.4.192.11` (contenedor `gns3/srv-dns`, VLAN 40 Bogotá, SW1-BOG f1/5)
-- **Servidor DHCP:** `10.4.192.10` (ya implementado)
-- **Dominio:** `redes2026.local` · zona inversa `10.in-addr.arpa`
-- **Forwarders externos:** 8.8.8.8, 1.1.1.1 (vía NAT/BGP)
-- **Credenciales de red:** `Redes2026`
+- Servidor DNS: `10.4.192.11` (contenedor `gns3/srv-dns`, VLAN 40 Bogotá, SW1-BOG f1/5)
+- Servidor DHCP: `10.4.192.10`
+- Dominio: `redes2026.local`, zona inversa `10.in-addr.arpa`
+- Forwarders externos: 8.8.8.8 y 1.1.1.1, vía NAT y BGP
+- Credenciales de red: `Redes2026`

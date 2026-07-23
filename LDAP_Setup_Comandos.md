@@ -1,19 +1,16 @@
-# LDAP MirrorMode — Comandos ready to paste
+# LDAP en MirrorMode entre las cuatro sedes
 
-Todo lo de las secciones 0–5 se ejecuta **en el host de GNS3** (el que tiene internet real, donde haces los `docker build`).
-Las secciones 6–8 se ejecutan **dentro de los contenedores** o desde el cliente `ldap-utils`.
+Las secciones 0 a 5 se ejecutan en el host de GNS3, que es el que tiene salida a Internet real y donde se hacen los `docker build`. Las secciones 6 a 8 se ejecutan dentro de los contenedores o desde el cliente `ldap-utils`.
 
----
-
-## 0) Crear el directorio de trabajo
+## 0. Directorio de trabajo
 
 ```bash
 mkdir -p ~/gns3-servers/ldap-repl && cd ~/gns3-servers/ldap-repl
 ```
 
----
+## 1. `bootstrap.ldif`
 
-## 1) `bootstrap.ldif` (solo lo usa Bogotá)
+Solo lo carga la imagen de Bogotá. Las demás sedes reciben los datos por replicación.
 
 ```bash
 cat > bootstrap.ldif <<'EOF'
@@ -97,12 +94,11 @@ userPassword: ClaveDeLuis345
 EOF
 ```
 
-> Son 8 entradas + la base `dc=redes2026,dc=local` que crea osixia sola = los **9 `dn:`** esperados.
-> Si ya tienes tu `bootstrap.ldif` funcionando con los 5 usuarios, cópialo a esta carpeta y salta este paso.
+Son 8 entradas más la base `dc=redes2026,dc=local` que crea la imagen de osixia, lo que da los 9 `dn:` que se esperan en la verificación.
 
----
+## 2. `00-syncprov.ldif`
 
-## 2) `00-syncprov.ldif` (idéntico en las 4 sedes)
+Idéntico en las cuatro sedes.
 
 ```bash
 cat > 00-syncprov.ldif <<'EOF'
@@ -121,9 +117,9 @@ olcSpSessionlog: 100
 EOF
 ```
 
----
+## 3. Generación de los cuatro LDIF de replicación
 
-## 3) Generar los 4 LDIF de replicación
+Cada sede necesita su propio `olcServerID` y una línea `olcSyncRepl` por cada uno de los otros tres servidores. Se generaron con un script para evitar errores al escribirlos a mano:
 
 ```bash
 cat > gen-repl.sh <<'EOF'
@@ -153,9 +149,9 @@ EOF
 chmod +x gen-repl.sh && ./gen-repl.sh && cat repl-cuc.ldif
 ```
 
----
+## 4. `repl-start.sh`
 
-## 4) `repl-start.sh` (idéntico en las 4)
+Espera a que `slapd` esté escuchando y aplica los dos LDIF una sola vez, marcando con un archivo testigo para no repetir la configuración en cada arranque del contenedor. Es igual en las cuatro sedes.
 
 ```bash
 cat > repl-start.sh <<'EOF'
@@ -176,11 +172,11 @@ EOF
 chmod +x repl-start.sh
 ```
 
----
+## 5. Dockerfiles
 
-## 5) Los 4 Dockerfile
+### 5.1 Bogotá
 
-### 5.1 Bogotá — `Dockerfile.bog` (**el único con datos**)
+Es la única imagen que lleva el bootstrap con los datos.
 
 ```bash
 cat > Dockerfile.bog <<'EOF'
@@ -206,7 +202,11 @@ CMD ip addr add 10.4.192.12/18 dev eth0; ip link set eth0 up; ip route add defau
 EOF
 ```
 
-### 5.2 Santa Marta — `Dockerfile.sma` (sin bootstrap)
+La base de osixia es Debian buster, que ya salió de soporte, por eso se apuntan los repositorios a `archive.debian.org` antes de instalar las herramientas de diagnóstico.
+
+### 5.2 Santa Marta
+
+Sin bootstrap.
 
 ```bash
 cat > Dockerfile.sma <<'EOF'
@@ -231,7 +231,9 @@ CMD ip addr add 10.1.128.11/17 dev eth0; ip link set eth0 up; ip route add defau
 EOF
 ```
 
-### 5.3 Cúcuta — `Dockerfile.cuc`
+### 5.3 Cúcuta y Barranquilla
+
+Se derivan del de Santa Marta cambiando LDIF, IP y gateway:
 
 ```bash
 sed -e 's|repl-sma.ldif|repl-cuc.ldif|' \
@@ -239,11 +241,7 @@ sed -e 's|repl-sma.ldif|repl-cuc.ldif|' \
     -e 's|via 10.1.128.1|via 10.4.64.1|' \
     Dockerfile.sma > Dockerfile.cuc
 grep -E 'repl-|ip addr|route' Dockerfile.cuc
-```
 
-### 5.4 Barranquilla — `Dockerfile.baq`
-
-```bash
 sed -e 's|repl-sma.ldif|repl-baq.ldif|' \
     -e 's|10.1.128.11/17|10.5.0.10/16|' \
     -e 's|via 10.1.128.1|via 10.5.0.1|' \
@@ -251,11 +249,9 @@ sed -e 's|repl-sma.ldif|repl-baq.ldif|' \
 grep -E 'repl-|ip addr|route' Dockerfile.baq
 ```
 
-> **Verifica las máscaras contra tu Excel de VLSM antes de construir.** Las de arriba salen de los `netmask` que ya usas en los Dockerfile de WEB/FTP/Impresión.
+Las máscaras salen de los `netmask` usados en los Dockerfile de WEB, FTP e impresión, y se contrastaron contra la tabla de VLSM antes de construir.
 
----
-
-## 6) Build
+## 6. Build
 
 ```bash
 cd ~/gns3-servers/ldap-repl
@@ -266,40 +262,40 @@ docker build -t gns3/srv-ldap-baq -f Dockerfile.baq .
 docker images | grep srv-ldap
 ```
 
----
+## 7. Despliegue en GNS3
 
-## 7) En GNS3
+1. Se eliminan los cuatro nodos LDAP anteriores (borrar, no solo apagar). Eso destruye el `/var/lib/ldap` con los `entryUUID` viejos, que de otro modo entran en conflicto con la replicación.
+2. Se editan las cuatro plantillas para que apunten a las imágenes recién construidas: 1 NIC, Start command vacío, consola telnet.
+3. Se arrastran los cuatro nodos y se cablean a los puertos de la VLAN 40 de cada sede.
+4. Se enciende primero Bogotá. Después de unos 20 segundos, las otras tres.
 
-1. **Borrar** (no solo apagar) los 4 nodos LDAP existentes → clic derecho › Delete. Esto destruye el `/var/lib/ldap` con los `entryUUID` viejos.
-2. Editar las 4 plantillas para que apunten a las imágenes recién construidas: 1 NIC, **Start command vacío**, consola `telnet`.
-3. Arrastrar los 4 nodos, cablearlos a los puertos de la VLAN 40 de cada sede.
-4. **Encender primero BOG.** Esperar ~20 s. Luego SMA, CUC y BAQ.
-
-Comprobar en la consola de cada nodo que salió el mensaje del script:
+En la consola de cada nodo debe aparecer el mensaje del script:
 
 ```
 [repl] configuracion aplicada
 ```
 
----
+## 8. Verificación
 
-## 8) Verificación
+### 8.1 ServerID
 
-### 8.1 ServerID correcto en cada nodo (dentro del contenedor)
+Dentro de cada contenedor:
 
 ```bash
 ldapsearch -Y EXTERNAL -H ldapi:/// -b cn=config -s base olcServerID -LLL
 ```
 
-Debe dar 1 en BOG, 2 en SMA, 3 en CUC, 4 en BAQ. **Si alguno da 0 o repetido, la replicación hará bucle.**
+Debe dar 1 en BOG, 2 en SMA, 3 en CUC y 4 en BAQ. Un 0 o un valor repetido hace que la replicación entre en bucle.
 
-### 8.2 Que el overlay syncprov cargó
+### 8.2 Overlay syncprov cargado
 
 ```bash
 ldapsearch -Y EXTERNAL -H ldapi:/// -b cn=config -LLL "(olcOverlay=syncprov)" dn
 ```
 
-### 8.3 Conteo de entradas en las 4 sedes (desde el cliente `ldap-utils`)
+### 8.3 Conteo de entradas
+
+Desde el cliente `ldap-utils`:
 
 ```bash
 for ip in 10.4.192.12 10.1.128.11 10.4.64.12 10.5.0.10; do
@@ -309,9 +305,9 @@ for ip in 10.4.192.12 10.1.128.11 10.4.64.12 10.5.0.10; do
 done
 ```
 
-Los cuatro deben decir **9**.
+Los cuatro devuelven 9.
 
-### 8.4 `contextCSN` — captura para el informe
+### 8.4 contextCSN
 
 ```bash
 for ip in 10.4.192.12 10.1.128.11 10.4.64.12 10.5.0.10; do
@@ -320,12 +316,15 @@ for ip in 10.4.192.12 10.1.128.11 10.4.64.12 10.5.0.10; do
 done
 ```
 
-Cada servidor debe listar **4 valores** (`#001#`, `#002#`, `#003#`, `#004#`) y el conjunto debe ser idéntico entre los 4.
+Cada servidor lista 4 valores (`#001#`, `#002#`, `#003#` y `#004#`) y el conjunto es idéntico en los cuatro.
 
-### 8.5 Propagación en vivo — crear en CUC, leer en las otras 3
+### 8.5 Propagación en vivo
+
+Se crea una entrada en Cúcuta y se consulta en las otras tres sedes.
+
+En la consola del nodo LDAP-CUC:
 
 ```bash
-# --- en la consola del nodo LDAP-CUC ---
 cat > /tmp/nuevo.ldif <<'EOF'
 dn: uid=pgomez,ou=usuarios,dc=redes2026,dc=local
 objectClass: inetOrgPerson
@@ -343,15 +342,18 @@ EOF
 ldapadd -x -H ldap://localhost -D "cn=admin,dc=redes2026,dc=local" -w Redes2026 -f /tmp/nuevo.ldif
 ```
 
+Desde el cliente, contra las otras tres:
+
 ```bash
-# --- desde el cliente, contra las otras tres ---
 for ip in 10.4.192.12 10.1.128.11 10.5.0.10; do
   printf "%-14s -> " "$ip"
   ldapsearch -x -H ldap://$ip -b "uid=pgomez,ou=usuarios,dc=redes2026,dc=local" -LLL cn 2>&1 | grep -E '^cn:|No such'
 done
 ```
 
-### 8.6 Autenticación cruzada — la matriz de la entrega
+### 8.6 Autenticación cruzada
+
+Los cinco usuarios contra los cuatro servidores:
 
 ```bash
 declare -A P=( [jperez]=ClaveDeJuan123 [mrodriguez]=ClaveDeMaria456 \
@@ -364,11 +366,11 @@ for u in "${!P[@]}"; do
 done
 ```
 
-Las 20 líneas deben devolver `dn:uid=<user>,ou=usuarios,dc=redes2026,dc=local`.
+Las 20 líneas devuelven `dn:uid=<usuario>,ou=usuarios,dc=redes2026,dc=local`.
 
----
+## 9. Depuración de la replicación
 
-## 9) Si algo falla — subir el log de sync
+Para subir el nivel de log:
 
 ```bash
 ldapmodify -Y EXTERNAL -H ldapi:/// <<'EOF'
@@ -378,12 +380,11 @@ replace: olcLogLevel
 olcLogLevel: sync stats
 EOF
 
-# ver qué está pasando
 cat /var/log/repl.log
 tail -f /var/log/syslog 2>/dev/null || docker logs <nombre-contenedor>
 ```
 
-Volver a silencio cuando termines:
+Para volver a dejarlo en silencio:
 
 ```bash
 ldapmodify -Y EXTERNAL -H ldapi:/// <<'EOF'
@@ -394,9 +395,7 @@ olcLogLevel: none
 EOF
 ```
 
----
-
-## 10) Al cerrar — exportar imágenes
+## 10. Exportación de las imágenes
 
 ```bash
 docker save -o imagenes-docker.tar \
