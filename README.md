@@ -1,6 +1,11 @@
 # Paprika_RedesFinalP
+Desarrollado por:
+-  Santiago Quevedo(Volta50)
+-  Alejandro Llano
+-  Diego Baragán
+-  Juan Diego López
 
-Proyecto final de redes en GNS3: 4 sedes (Bogotá, Santa Marta, Cúcuta y Barranquilla) con EIGRP 100, HSRP, STP, NAT/PAT y eBGP hacia ISP, y los servicios de DHCP, DNS y LDAP montados en contenedores Docker.
+Paprika wurde entführt
 
 ## Instalación
 
